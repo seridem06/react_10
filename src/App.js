@@ -51,7 +51,7 @@ const theme = createTheme({
 });
 
 function App() {
-  // --- ESTADOS ---
+  // --- ESTADOS PRINCIPALES ---
   const [esquemas, setEsquemas] = useState([]); 
   const [negocioSeleccionado, setNegocioSeleccionado] = useState(null); 
   const [mostrarCreador, setMostrarCreador] = useState(false); 
@@ -63,7 +63,7 @@ function App() {
   // Nuevo estado para la plantilla de carga JSON independiente
   const [jsonInputCarga, setJsonInputCarga] = useState(""); 
 
-  // --- ESTADOS DEL CONSTRUCTOR (MANTENIENDO TODAS LAS VALIDACIONES) ---
+  // --- ESTADOS DEL CONSTRUCTOR (RECUPERADOS ÍNTEGRAMENTE) ---
   const [nuevoSistemaNombre, setNuevoSistemaNombre] = useState("");
   const [idAutomatico, setIdAutomatico] = useState(true); 
   const [nuevosCampos, setNuevosCampos] = useState([]);
@@ -75,10 +75,10 @@ function App() {
       options: "",    
       isInteger: false,
       numLength: "", 
-      decimals: "0"
+      decimals: "2"
   });
 
-  // CARGAR AL INICIO
+  // CARGAR AL INICIO (PERSISTENCIA SQLITE)
   useEffect(() => {
     fetch('http://localhost:8000/api/schemas/')
       .then(res => res.json())
@@ -92,10 +92,11 @@ function App() {
       setForm({});
       setModoEdicion(false);
       
-      // Generar plantilla de carga inteligente (Excluyendo el ID que es automático)
       const estructura = {};
       negocioSeleccionado.campos.forEach(c => {
-        if (c.key !== 'id') estructura[c.key] = c.type === 'number' ? 0 : "...";
+        if (c.key !== 'id') {
+          estructura[c.key] = (c.type === 'number' && !c.isInteger) ? "0.00" : (c.type === 'number' ? 0 : "...");
+        }
       });
       setJsonInputCarga(JSON.stringify(estructura, null, 2));
     }
@@ -105,6 +106,14 @@ function App() {
     fetch(`http://localhost:8000/api/data/?negocio=${nombreNegocio}`)
       .then(res => res.json())
       .then(setDatos);
+  };
+
+  // --- FORMATEADOR DE DECIMALES (CORRECCIÓN VISUAL SOLICITADA) ---
+  const formatearValor = (valor, campoConfig) => {
+    if (campoConfig.type === 'number' && !campoConfig.isInteger && valor !== undefined && valor !== null && valor !== "") {
+       return parseFloat(valor).toFixed(2);
+    }
+    return valor;
   };
 
   // --- LÓGICA DE ELIMINAR SISTEMA ---
@@ -120,21 +129,31 @@ function App() {
     }
   };
 
-  // --- LÓGICA DE FORMULARIO INTELIGENTE (TODAS LAS VALIDACIONES) ---
+  // --- LÓGICA DE FORMULARIO CON TODAS LAS VALIDACIONES (CORREGIDA) ---
   const handleInputChange = (e, campoConfig) => {
     let value = e.target.value;
 
     // 1. Validar Enteros
     if (campoConfig.type === 'number' && campoConfig.isInteger && value.includes('.')) return;
     
-    // 2. Validar Cantidad de Números y Decimales
-    if (campoConfig.type === 'number') {
-      if (campoConfig.numLength && value.replace('.', '').length > parseInt(campoConfig.numLength)) return;
-      if (campoConfig.decimals > 0 && value.includes('.') && value.split('.')[1].length > parseInt(campoConfig.decimals)) return;
+    // 2. Validar Decimales (Máximo 2)
+    if (campoConfig.type === 'number' && value.includes('.')) {
+      if (value.split('.')[1].length > 2) return;
     }
 
-    // 3. Validar Longitud Máxima (DNI, Celular)
-    if (campoConfig.maxLength && value.length > parseInt(campoConfig.maxLength)) return;
+    // 3. Validar Longitud Máxima para TEXTO (DNI, Celular)
+    if (campoConfig.type === 'text' && campoConfig.maxLength && value.length > parseInt(campoConfig.maxLength)) {
+      return;
+    }
+
+    // 4. NUEVA VALIDACIÓN: Longitud Máxima para NÚMEROS
+    if (campoConfig.type === 'number' && campoConfig.numLength) {
+      // Remover el punto decimal para contar solo dígitos
+      const soloDigitos = value.replace('.', '');
+      if (soloDigitos.length > parseInt(campoConfig.numLength)) {
+        return;
+      }
+    }
 
     setForm({ ...form, [e.target.name]: value });
   };
@@ -167,14 +186,76 @@ function App() {
     });
   };
 
-  // Carga de datos desde el editor JSON aparte
+  // --- LÓGICA DE CARGA JSON (CORREGIDA Y COMPLETA) ---
   const manejarCargaDesdeJson = () => {
     try {
       const parsed = JSON.parse(jsonInputCarga);
+      
+      // Validar que los campos del JSON coincidan con el esquema
+      const camposEsquema = negocioSeleccionado.campos
+        .filter(c => c.key !== 'id' || !negocioSeleccionado.config?.idAutomatico)
+        .map(c => c.key);
+      
+      const camposJson = Object.keys(parsed);
+      const camposFaltantes = camposEsquema.filter(c => !camposJson.includes(c));
+      
+      if (camposFaltantes.length > 0) {
+        Swal.fire({
+          title: 'Advertencia',
+          text: `Faltan campos en el JSON: ${camposFaltantes.join(', ')}`,
+          icon: 'warning',
+          background: '#1a1a1a',
+          color: '#0f0'
+        });
+        return;
+      }
+
+      // Actualizar el formulario visual
       setForm(parsed);
-      Swal.fire('Éxito', 'JSON inyectado al formulario', 'success');
+      
+      // CORRECCIÓN PRINCIPAL: Enviar directamente al backend
+      const url = 'http://localhost:8000/api/data/?negocio=' + negocioSeleccionado.nombre;
+      
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed)
+      })
+      .then(res => {
+        if (!res.ok) throw new Error('Error al guardar');
+        return res.json();
+      })
+      .then(() => {
+        fetchDatos(negocioSeleccionado.nombre);
+        setForm({});
+        Swal.fire({ 
+          title: 'Éxito', 
+          text: 'JSON cargado y registrado correctamente', 
+          icon: 'success',
+          timer: 1500,
+          showConfirmButton: false,
+          background: '#000', 
+          color: '#0f0' 
+        });
+      })
+      .catch(err => {
+        Swal.fire({
+          title: 'Error',
+          text: 'No se pudo guardar el registro: ' + err.message,
+          icon: 'error',
+          background: '#1a1a1a',
+          color: '#0f0'
+        });
+      });
+      
     } catch (e) {
-      Swal.fire('Error', 'Formato JSON inválido', 'error');
+      Swal.fire({
+        title: 'Error',
+        text: 'Formato JSON inválido',
+        icon: 'error',
+        background: '#1a1a1a',
+        color: '#0f0'
+      });
     }
   };
 
@@ -188,7 +269,7 @@ function App() {
     if (!campoTemporal.label) return;
     const key = campoTemporal.label.toLowerCase().replace(/ /g, "_");
     setNuevosCampos([...nuevosCampos, { ...campoTemporal, key }]);
-    setCampoTemporal({ label: "", type: "text", maxLength: "", options: "", isInteger: false, numLength: "", decimals: "0" });
+    setCampoTemporal({ label: "", type: "text", maxLength: "", options: "", isInteger: false, numLength: "", decimals: "2" });
   };
 
   const guardarSistemaBuilder = () => {
@@ -216,7 +297,6 @@ function App() {
     });
   };
 
-  // Función para asegurar que el ID siempre sea el primer campo renderizado
   const camposConIdPrimero = (campos) => {
     return [...campos].sort((a, b) => (a.key === 'id' ? -1 : b.key === 'id' ? 1 : 0));
   };
@@ -266,8 +346,8 @@ function App() {
                         </Grid>
                         <Grid item xs={12} md={3}>
                             <FormControl fullWidth size="small">
-                                <InputLabel>Formato</InputLabel>
-                                <Select value={campoTemporal.type} label="Formato" onChange={(e)=>setCampoTemporal({...campoTemporal, type:e.target.value})}>
+                                <InputLabel id="label-tipo-constructor">Formato</InputLabel>
+                                <Select labelId="label-tipo-constructor" value={campoTemporal.type} label="Formato" onChange={(e)=>setCampoTemporal({...campoTemporal, type:e.target.value})}>
                                     <MenuItem value="text">Texto</MenuItem>
                                     <MenuItem value="number">Número</MenuItem>
                                     <MenuItem value="select">Lista (Select)</MenuItem>
@@ -312,8 +392,8 @@ function App() {
             </Card>
         )}
 
+        {/* --- LAYOUT PRINCIPAL --- */}
         <Grid container spacing={2} sx={{ flexGrow: 1, flexDirection: { xs: 'column', md: 'row' } }}>
-            {/* IZQUIERDA: MENÚ SISTEMAS */}
             <Grid item xs={12} md={3}>
                 <Paper sx={{ height: '100%', border: '1px solid #333', bgcolor: '#0a0a0a' }}>
                     <Box sx={{ p: 2, borderBottom: '1px solid #333', display:'flex', alignItems:'center' }}>
@@ -337,7 +417,6 @@ function App() {
                 </Paper>
             </Grid>
 
-            {/* DERECHA: TRABAJO */}
             <Grid item xs={12} md={9}>
                 {negocioSeleccionado ? (
                     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -350,9 +429,10 @@ function App() {
                                 {camposConIdPrimero(negocioSeleccionado.campos).map((campo) => (
                                     <Grid item xs={12} sm={4} key={campo.key}>
                                         {campo.type === 'select' ? (
-                                            <FormControl fullWidth size="small">
-                                                <InputLabel>{campo.label}</InputLabel>
-                                                <Select value={form[campo.key] || ''} label={campo.label} name={campo.key} onChange={(e) => handleInputChange(e, campo)}>
+                                            <FormControl fullWidth size="small" sx={{ '& .MuiSelect-select': { minWidth: '150px' } }}>
+                                                {/* FIX: labelId y label vinculados para evitar el recorte visual */}
+                                                <InputLabel id={`lbl-${campo.key}`}>{campo.label}</InputLabel>
+                                                <Select labelId={`lbl-${campo.key}`} value={form[campo.key] || ''} label={campo.label} name={campo.key} onChange={(e) => handleInputChange(e, campo)}>
                                                     {campo.options.split(',').map(opt => <MenuItem key={opt} value={opt.trim()}>{opt.trim()}</MenuItem>)}
                                                 </Select>
                                             </FormControl>
@@ -363,8 +443,8 @@ function App() {
                                                 value={campo.key === 'id' && negocioSeleccionado.config?.idAutomatico ? 'AUTO' : (form[campo.key] || '')}
                                                 onChange={(e) => handleInputChange(e, campo)}
                                                 fullWidth size="small"
-                                                type={campo.type === 'date' ? 'date' : (campo.type === 'number' ? 'number' : 'text')}
-                                                InputLabelProps={(campo.type === 'date' || (campo.key === 'id' && negocioSeleccionado.config?.idAutomatico)) ? { shrink: true } : {}}
+                                                type={campo.type === 'date' ? 'date' : 'text'}
+                                                InputLabelProps={{ shrink: true }}
                                                 disabled={campo.key === 'id' && negocioSeleccionado.config?.idAutomatico}
                                             />
                                         )}
@@ -385,7 +465,7 @@ function App() {
                                 <TableBody>
                                     {datos.map((row, idx) => (
                                         <TableRow key={idx} hover>
-                                            {camposConIdPrimero(negocioSeleccionado.campos).map(c => <TableCell key={c.key}>{row[c.key]}</TableCell>)}
+                                            {camposConIdPrimero(negocioSeleccionado.campos).map(c => <TableCell key={c.key}>{formatearValor(row[c.key], c)}</TableCell>)}
                                             <TableCell>
                                                 <IconButton size="small" onClick={() => {setForm(row); setModoEdicion(true)}}><Edit fontSize="small" sx={{color:'#0f0'}}/></IconButton>
                                                 <IconButton size="small" onClick={() => eliminarDato(row.id)}><Delete fontSize="small" color="error"/></IconButton>
@@ -396,11 +476,11 @@ function App() {
                             </Table>
                         </TableContainer>
 
-                        {/* EDITOR PARA CARGAR JSON (APARTE) */}
+                        {/* MÓDULO DE CARGA JSON (CORREGIDO Y FUNCIONAL) */}
                         <Card sx={{ border: '1px solid #0f0', bgcolor: '#000' }}>
                           <Box sx={{ p: 1, bgcolor: '#111', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <Typography variant="caption" color="primary">MODULO_CARGA_JSON (PLANTILLA)</Typography>
-                            <Button size="small" variant="outlined" onClick={manejarCargaDesdeJson} startIcon={<PlaylistAdd/>}>CARGAR AL FORMULARIO</Button>
+                            <Typography variant="caption" color="primary">MODULO_CARGA_JSON (PLANTILLA SIN ID)</Typography>
+                            <Button size="small" variant="outlined" onClick={manejarCargaDesdeJson} startIcon={<PlaylistAdd/>}>CARGAR Y REGISTRAR</Button>
                           </Box>
                           <textarea
                             style={{ width: '100%', height: '100px', backgroundColor: '#000', color: '#0f0', border: 'none', padding: '10px', fontFamily: 'Consolas', outline: 'none', resize: 'vertical' }}
@@ -413,14 +493,18 @@ function App() {
             </Grid>
         </Grid>
 
-        {/* VISOR GENERAL - VISUALIZACIÓN JSON COMPLETA */}
-        <Box sx={{ mt: 2, height: {xs: '200px', md: '250px'}, bgcolor: '#1a1a1a', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+        {/* VISOR GENERAL JSON (ABAJO, FORMATEADO CON 2 DECIMALES ESTRICTOS) */}
+        <Box sx={{ mt: 2, height: '400px', bgcolor: '#1a1a1a', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
             <Box sx={{ px: 2, py: 1, bgcolor: '#000', borderBottom: '1px solid #333' }}>
-                <Typography variant="caption" sx={{ color: '#ff0' }}>LIVE_DATA_STREAM_JSON (TOTAL)</Typography>
+                <Typography variant="caption" sx={{ color: '#ff0' }}>LIVE_DATA_STREAM_JSON (TOTAL 2 DECIMALS)</Typography>
             </Box>
             <Box sx={{ p: 1, overflow: 'auto', flexGrow: 1 }}>
                 <pre style={{ margin: 0, color: '#00ff00', fontSize: '12px', fontFamily: 'Consolas' }}>
-                    {JSON.stringify(datos, null, 2)}
+                    {JSON.stringify(datos.map(d => {
+                        let f = {...d};
+                        negocioSeleccionado?.campos.forEach(c => { if(c.type === 'number' && !c.isInteger) f[c.key] = parseFloat(d[c.key]).toFixed(2); });
+                        return f;
+                    }), null, 2)}
                 </pre>
             </Box>
         </Box>
