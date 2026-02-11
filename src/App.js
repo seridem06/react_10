@@ -13,16 +13,21 @@ import {
   KeyboardArrowRight, PlaylistAdd, FactCheck 
 } from '@mui/icons-material';
 
-// --- TEMA HACKER (Fondo Blanco / Contrastes Negros y Verdes) ---
+// --- TEMA HACKER (Fondo Plomo Tenue Forzado) ---
 const theme = createTheme({
   palette: {
     mode: 'dark',
     primary: { main: '#00ff00' },
-    background: { default: '#ffffff', paper: '#1a1a1a' },
+    background: { default: '#b0b0b0', paper: '#1a1a1a' },
     text: { primary: '#00ff00', secondary: '#00cc00' },
   },
   typography: { fontFamily: '"Consolas", monospace', allVariants: { color: '#00ff00' } },
   components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        body: { backgroundColor: '#b0b0b0', margin: 0, padding: 0 }
+      }
+    },
     MuiOutlinedInput: {
       styleOverrides: {
         root: {
@@ -36,7 +41,6 @@ const theme = createTheme({
     },
     MuiButton: { styleOverrides: { root: { border: '1px solid #00ff00', borderRadius: 0, fontWeight: 'bold' } } },
     MuiTableCell: { styleOverrides: { root: { textAlign: 'center', borderBottom: '1px solid #333' } } },
-    // Estilo para el Switch
     MuiSwitch: {
       styleOverrides: {
         switchBase: { color: '#555', '&.Mui-checked': { color: '#00ff00' } },
@@ -55,19 +59,23 @@ function App() {
   const [datos, setDatos] = useState([]);
   const [form, setForm] = useState({});
   const [modoEdicion, setModoEdicion] = useState(false);
+  
+  // Nuevo estado para la plantilla de carga JSON independiente
+  const [jsonInputCarga, setJsonInputCarga] = useState(""); 
 
-  // --- ESTADOS DEL CONSTRUCTOR (RECUPERANDO VALIDACIONES) ---
+  // --- ESTADOS DEL CONSTRUCTOR (MANTENIENDO TODAS LAS VALIDACIONES) ---
   const [nuevoSistemaNombre, setNuevoSistemaNombre] = useState("");
   const [idAutomatico, setIdAutomatico] = useState(true); 
   const [nuevosCampos, setNuevosCampos] = useState([]);
   
-  // Campo temporal CON PROPIEDADES AVANZADAS
   const [campoTemporal, setCampoTemporal] = useState({ 
       label: "", 
       type: "text", 
-      maxLength: "",  // Para DNI
-      options: "",    // Para Select (M,F)
-      isInteger: false // Para enteros
+      maxLength: "",  
+      options: "",    
+      isInteger: false,
+      numLength: "", 
+      decimals: "0"
   });
 
   // CARGAR AL INICIO
@@ -77,12 +85,19 @@ function App() {
       .then(setEsquemas);
   }, []);
 
-  // CARGAR DATOS
+  // CARGAR DATOS Y GENERAR PLANTILLA JSON
   useEffect(() => {
     if (negocioSeleccionado) {
       fetchDatos(negocioSeleccionado.nombre);
       setForm({});
       setModoEdicion(false);
+      
+      // Generar plantilla de carga inteligente (Excluyendo el ID que es automático)
+      const estructura = {};
+      negocioSeleccionado.campos.forEach(c => {
+        if (c.key !== 'id') estructura[c.key] = c.type === 'number' ? 0 : "...";
+      });
+      setJsonInputCarga(JSON.stringify(estructura, null, 2));
     }
   }, [negocioSeleccionado]);
 
@@ -92,20 +107,48 @@ function App() {
       .then(setDatos);
   };
 
-  // --- LÓGICA DE FORMULARIO INTELIGENTE ---
+  // --- LÓGICA DE ELIMINAR SISTEMA ---
+  const eliminarSistema = (nombreNegocio) => {
+    if (window.confirm(`¿Seguro que deseas eliminar el sistema "${nombreNegocio}"?`)) {
+      fetch(`http://localhost:8000/api/schemas/?nombre=${nombreNegocio}`, { method: 'DELETE' })
+        .then(res => {
+          if (!res.ok) throw new Error('Error en el servidor');
+          setEsquemas(esquemas.filter(e => e.nombre !== nombreNegocio));
+          if (negocioSeleccionado?.nombre === nombreNegocio) setNegocioSeleccionado(null);
+        })
+        .catch(err => Swal.fire('Error', 'No se pudo conectar con el servidor', 'error'));
+    }
+  };
+
+  // --- LÓGICA DE FORMULARIO INTELIGENTE (TODAS LAS VALIDACIONES) ---
   const handleInputChange = (e, campoConfig) => {
     let value = e.target.value;
 
     // 1. Validar Enteros
     if (campoConfig.type === 'number' && campoConfig.isInteger && value.includes('.')) return;
     
-    // 2. Validar Longitud Máxima (DNI, Celular)
+    // 2. Validar Cantidad de Números y Decimales
+    if (campoConfig.type === 'number') {
+      if (campoConfig.numLength && value.replace('.', '').length > parseInt(campoConfig.numLength)) return;
+      if (campoConfig.decimals > 0 && value.includes('.') && value.split('.')[1].length > parseInt(campoConfig.decimals)) return;
+    }
+
+    // 3. Validar Longitud Máxima (DNI, Celular)
     if (campoConfig.maxLength && value.length > parseInt(campoConfig.maxLength)) return;
 
     setForm({ ...form, [e.target.name]: value });
   };
 
   const handleSubmitDatos = () => {
+    // VALIDACIÓN ESTRICTA: No permitir campos vacíos
+    const camposRequeridos = negocioSeleccionado.campos.filter(c => c.key !== 'id' || !negocioSeleccionado.config?.idAutomatico);
+    const hayVacios = camposRequeridos.some(c => !form[c.key] || form[c.key].toString().trim() === "");
+
+    if (hayVacios) {
+        Swal.fire({ title: 'Atención', text: 'Todos los campos definidos son obligatorios para el registro', icon: 'warning', background: '#1a1a1a', color: '#0f0' });
+        return;
+    }
+
     const payload = { ...form };
     const url = modoEdicion 
         ? `http://localhost:8000/api/data/${form.id}/?negocio=${negocioSeleccionado.nombre}`
@@ -124,6 +167,17 @@ function App() {
     });
   };
 
+  // Carga de datos desde el editor JSON aparte
+  const manejarCargaDesdeJson = () => {
+    try {
+      const parsed = JSON.parse(jsonInputCarga);
+      setForm(parsed);
+      Swal.fire('Éxito', 'JSON inyectado al formulario', 'success');
+    } catch (e) {
+      Swal.fire('Error', 'Formato JSON inválido', 'error');
+    }
+  };
+
   const eliminarDato = (id) => {
       fetch(`http://localhost:8000/api/data/${id}/?negocio=${negocioSeleccionado.nombre}`, { method: 'DELETE' })
       .then(() => fetchDatos(negocioSeleccionado.nombre));
@@ -133,12 +187,8 @@ function App() {
   const agregarCampoBuilder = () => {
     if (!campoTemporal.label) return;
     const key = campoTemporal.label.toLowerCase().replace(/ /g, "_");
-    
-    // Guardamos TODAS las propiedades (maxLength, options, isInteger)
     setNuevosCampos([...nuevosCampos, { ...campoTemporal, key }]);
-    
-    // Reset
-    setCampoTemporal({ label: "", type: "text", maxLength: "", options: "", isInteger: false });
+    setCampoTemporal({ label: "", type: "text", maxLength: "", options: "", isInteger: false, numLength: "", decimals: "0" });
   };
 
   const guardarSistemaBuilder = () => {
@@ -166,13 +216,18 @@ function App() {
     });
   };
 
+  // Función para asegurar que el ID siempre sea el primer campo renderizado
+  const camposConIdPrimero = (campos) => {
+    return [...campos].sort((a, b) => (a.key === 'id' ? -1 : b.key === 'id' ? 1 : 0));
+  };
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <Container maxWidth="xl" sx={{ mt: 2, mb: 4, height: '95vh', display: 'flex', flexDirection: 'column' }}>
+      <Container maxWidth={false} sx={{ mt: 2, mb: 4, minHeight: '95vh', display: 'flex', flexDirection: 'column' }}>
         
-        {/* HEADER */}
-        <Box sx={{ borderBottom: '2px solid #333', mb: 2, pb: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        {/* HEADER RESPONSIVE */}
+        <Box sx={{ borderBottom: '2px solid #333', mb: 2, pb: 1, display: 'flex', flexDirection: {xs:'column', sm:'row'}, justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
             <Box sx={{ display: 'flex', alignItems: 'center' }}>
                 <Terminal sx={{ fontSize: 35, mr: 2, color: '#000' }} />
                 <Typography variant="h5" sx={{ fontWeight: 'bold', color: '#000 !important' }}>
@@ -194,86 +249,71 @@ function App() {
             <Card sx={{ mb: 2, border: '2px dashed #000', bgcolor: '#1a1a1a', p: 1 }}>
                 <CardContent>
                     <Grid container spacing={2} alignItems="center">
-                        {/* 1. CONFIGURACIÓN GENERAL */}
-                        <Grid item xs={8}>
-                            <TextField 
-                                label="Nombre del Negocio (Ej: FARMACIA)" 
-                                fullWidth 
-                                value={nuevoSistemaNombre} 
-                                onChange={(e)=>setNuevoSistemaNombre(e.target.value)} 
-                            />
+                        <Grid item xs={12} md={8}>
+                            <TextField label="Nombre del Negocio (Ej: FARMACIA)" fullWidth value={nuevoSistemaNombre} onChange={(e)=>setNuevoSistemaNombre(e.target.value)} />
                         </Grid>
-                        <Grid item xs={4}>
+                        <Grid item xs={12} md={4}>
                             <Paper variant="outlined" sx={{p:1, bgcolor:'#000', textAlign:'center', border:'1px solid #333'}}>
                                 <Typography variant="caption" sx={{color:'#888'}}>CONTROL DE ID</Typography>
-                                <FormControlLabel 
-                                    control={<Switch checked={idAutomatico} onChange={(e)=>setIdAutomatico(e.target.checked)}/>}
-                                    label={idAutomatico ? "AUTOMÁTICO" : "MANUAL"}
-                                    sx={{ml:1}}
-                                />
+                                <FormControlLabel control={<Switch checked={idAutomatico} onChange={(e)=>setIdAutomatico(e.target.checked)}/>} label={idAutomatico ? "AUTOMÁTICO" : "MANUAL"} sx={{ml:1}} />
                             </Paper>
                         </Grid>
                         
                         <Grid item xs={12}><Divider sx={{my:1, bgcolor:'#333'}}/></Grid>
 
-                        {/* 2. DEFINICIÓN DE CAMPOS CON VALIDACIÓN */}
-                        <Grid item xs={3}>
+                        <Grid item xs={12} md={3}>
                             <TextField label="Nombre Dato (Ej: DNI)" fullWidth size="small" value={campoTemporal.label} onChange={(e)=>setCampoTemporal({...campoTemporal, label:e.target.value})} />
                         </Grid>
-                        <Grid item xs={3}>
+                        <Grid item xs={12} md={3}>
                             <FormControl fullWidth size="small">
                                 <InputLabel>Formato</InputLabel>
                                 <Select value={campoTemporal.type} label="Formato" onChange={(e)=>setCampoTemporal({...campoTemporal, type:e.target.value})}>
                                     <MenuItem value="text">Texto</MenuItem>
                                     <MenuItem value="number">Número</MenuItem>
                                     <MenuItem value="select">Lista (Select)</MenuItem>
+                                    <MenuItem value="date">Fecha</MenuItem>
                                 </Select>
                             </FormControl>
                         </Grid>
                         
-                        {/* 3. REGLAS EXTRA (AQUI ESTÁ LA MAGIA) */}
-                        <Grid item xs={4}>
+                        <Grid item xs={12} md={4}>
                             {campoTemporal.type === 'text' && (
-                                <TextField 
-                                    label="Máx Caracteres (Ej: 8)" size="small" fullWidth 
-                                    value={campoTemporal.maxLength} 
-                                    onChange={(e)=>setCampoTemporal({...campoTemporal, maxLength:e.target.value})} 
-                                />
+                                <TextField label="Máx Caracteres" size="small" fullWidth value={campoTemporal.maxLength} onChange={(e)=>setCampoTemporal({...campoTemporal, maxLength:e.target.value})} />
                             )}
                             {campoTemporal.type === 'number' && (
-                                <FormControlLabel 
-                                    control={<Checkbox checked={campoTemporal.isInteger} onChange={(e)=>setCampoTemporal({...campoTemporal, isInteger:e.target.checked})}/>} 
-                                    label="Solo Enteros" 
-                                />
+                                <Box sx={{display:'flex', gap:1}}>
+                                    <TextField label="Long. Total" size="small" value={campoTemporal.numLength} onChange={(e)=>setCampoTemporal({...campoTemporal, numLength:e.target.value})} />
+                                    <TextField label="Decimales" size="small" value={campoTemporal.decimals} onChange={(e)=>setCampoTemporal({...campoTemporal, decimals:e.target.value})} />
+                                    <FormControlLabel control={<Checkbox checked={campoTemporal.isInteger} onChange={(e)=>setCampoTemporal({...campoTemporal, isInteger:e.target.checked})}/>} label="Enteros" />
+                                </Box>
                             )}
                             {campoTemporal.type === 'select' && (
-                                <TextField 
-                                    label="Opciones (Ej: M,F,X)" size="small" fullWidth 
-                                    value={campoTemporal.options} 
-                                    onChange={(e)=>setCampoTemporal({...campoTemporal, options:e.target.value})} 
-                                />
+                                <TextField label="Opciones (Ej: M,F,X)" size="small" fullWidth value={campoTemporal.options} onChange={(e)=>setCampoTemporal({...campoTemporal, options:e.target.value})} />
                             )}
                         </Grid>
-                        <Grid item xs={2}><Button variant="contained" fullWidth onClick={agregarCampoBuilder}>AÑADIR CAMPO</Button></Grid>
+                        <Grid item xs={12} md={2}><Button variant="contained" fullWidth onClick={agregarCampoBuilder}>AÑADIR CAMPO</Button></Grid>
                     </Grid>
                     
-                    {/* PREVIEW */}
-                    <Box sx={{ mt: 2, display:'flex', gap:1, flexWrap:'wrap' }}>
-                        {nuevosCampos.map((c, i) => (
-                            <Typography key={i} variant="caption" sx={{ border: '1px solid #333', p: 0.5, bgcolor:'#000' }}>
-                                {c.label} [{c.type}]
-                            </Typography>
-                        ))}
+                    <Box sx={{ mt: 2, p: 2, bgcolor: '#000', border: '1px solid #333' }}>
+                        <Typography variant="caption" color="primary">VISTA PREVIA DE CAMPOS:</Typography>
+                        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mt: 1 }}>
+                            {nuevosCampos.map((c, i) => (
+                                <Box key={i} sx={{ border: '1px solid #0f0', p: '2px 8px', display: 'flex', alignItems: 'center', gap: 1 }}>
+                                    <Typography variant="caption">{c.label} [{c.type}]</Typography>
+                                    <IconButton size="small" onClick={() => setNuevosCampos(nuevosCampos.filter((_, idx) => idx !== i))}>
+                                        <Delete sx={{ fontSize: 14, color: 'red' }} />
+                                    </IconButton>
+                                </Box>
+                            ))}
+                        </Box>
                     </Box>
-                    <Button fullWidth variant="outlined" sx={{ mt: 2 }} onClick={guardarSistemaBuilder}>GENERAR SISTEMA</Button>
+                    <Button fullWidth variant="outlined" sx={{ mt: 2 }} onClick={guardarSistemaBuilder}>GENERAR SISTEMA COMPLETO</Button>
                 </CardContent>
             </Card>
         )}
 
-        {/* --- LAYOUT PRINCIPAL --- */}
-        <Grid container spacing={2} sx={{ flexGrow: 1 }}>
-            
-            {/* IZQUIERDA: MENÚ */}
+        <Grid container spacing={2} sx={{ flexGrow: 1, flexDirection: { xs: 'column', md: 'row' } }}>
+            {/* IZQUIERDA: MENÚ SISTEMAS */}
             <Grid item xs={12} md={3}>
                 <Paper sx={{ height: '100%', border: '1px solid #333', bgcolor: '#0a0a0a' }}>
                     <Box sx={{ p: 2, borderBottom: '1px solid #333', display:'flex', alignItems:'center' }}>
@@ -282,12 +322,12 @@ function App() {
                     </Box>
                     <List>
                         {esquemas.map((esquema, index) => (
-                            <ListItem key={index} disablePadding>
-                                <ListItemButton 
-                                    selected={negocioSeleccionado?.nombre === esquema.nombre}
-                                    onClick={() => setNegocioSeleccionado(esquema)}
-                                    sx={{ '&.Mui-selected': { bgcolor: '#111', borderRight: '4px solid #00ff00' } }}
-                                >
+                            <ListItem key={index} disablePadding secondaryAction={
+                                <IconButton edge="end" onClick={() => eliminarSistema(esquema.nombre)}>
+                                    <Delete color="error" fontSize="small" />
+                                </IconButton>
+                            }>
+                                <ListItemButton selected={negocioSeleccionado?.nombre === esquema.nombre} onClick={() => setNegocioSeleccionado(esquema)} sx={{ '&.Mui-selected': { bgcolor: '#111', borderRight: '4px solid #00ff00' } }}>
                                     <ListItemText primary={esquema.nombre} />
                                     {negocioSeleccionado?.nombre === esquema.nombre && <KeyboardArrowRight />}
                                 </ListItemButton>
@@ -301,75 +341,53 @@ function App() {
             <Grid item xs={12} md={9}>
                 {negocioSeleccionado ? (
                     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        
-                        {/* FORMULARIO DINÁMICO */}
                         <Paper sx={{ p: 2, border: '1px solid #333', bgcolor: '#000' }}>
                              <Box sx={{display:'flex', justifyContent:'space-between', mb:2, borderBottom:'1px solid #333', pb:1}}>
                                 <Typography variant="h6" color="primary">{negocioSeleccionado.nombre}</Typography>
                                 <FactCheck sx={{color:'#555'}}/>
                              </Box>
-
                              <Grid container spacing={2}>
-                                {negocioSeleccionado.campos.map((campo) => (
+                                {camposConIdPrimero(negocioSeleccionado.campos).map((campo) => (
                                     <Grid item xs={12} sm={4} key={campo.key}>
-                                        
-                                        {/* RENDERIZADO CONDICIONAL SEGÚN FORMATO */}
                                         {campo.type === 'select' ? (
                                             <FormControl fullWidth size="small">
                                                 <InputLabel>{campo.label}</InputLabel>
-                                                <Select
-                                                    value={form[campo.key] || ''}
-                                                    label={campo.label}
-                                                    name={campo.key}
-                                                    onChange={(e) => handleInputChange(e, campo)}
-                                                >
-                                                    {/* Generar opciones desde string guardado */}
-                                                    {campo.options.split(',').map(opt => (
-                                                        <MenuItem key={opt} value={opt.trim()}>{opt.trim()}</MenuItem>
-                                                    ))}
+                                                <Select value={form[campo.key] || ''} label={campo.label} name={campo.key} onChange={(e) => handleInputChange(e, campo)}>
+                                                    {campo.options.split(',').map(opt => <MenuItem key={opt} value={opt.trim()}>{opt.trim()}</MenuItem>)}
                                                 </Select>
                                             </FormControl>
                                         ) : (
                                             <TextField
                                                 label={campo.label}
                                                 name={campo.key}
-                                                // ID Automático: Mostrar "AUTO" / Manual: Mostrar valor
                                                 value={campo.key === 'id' && negocioSeleccionado.config?.idAutomatico ? 'AUTO' : (form[campo.key] || '')}
                                                 onChange={(e) => handleInputChange(e, campo)}
                                                 fullWidth size="small"
-                                                type={campo.type === 'number' ? 'number' : 'text'}
+                                                type={campo.type === 'date' ? 'date' : (campo.type === 'number' ? 'number' : 'text')}
+                                                InputLabelProps={(campo.type === 'date' || (campo.key === 'id' && negocioSeleccionado.config?.idAutomatico)) ? { shrink: true } : {}}
                                                 disabled={campo.key === 'id' && negocioSeleccionado.config?.idAutomatico}
-                                                // Mostrar ayuda si hay limite
-                                                helperText={campo.maxLength ? `Máx: ${campo.maxLength}` : ''}
                                             />
                                         )}
-
                                     </Grid>
                                 ))}
                                 <Grid item xs={12} display="flex" justifyContent="flex-end" gap={1}>
-                                    {modoEdicion && <Button color="error" onClick={() => {setModoEdicion(false); setForm({})}}>CANCELAR</Button>}
-                                    <Button variant="contained" onClick={handleSubmitDatos} startIcon={modoEdicion ? <Edit/> : <Save />}>
-                                        {modoEdicion ? 'ACTUALIZAR' : 'REGISTRAR'}
-                                    </Button>
+                                    <Button variant="contained" onClick={handleSubmitDatos} startIcon={modoEdicion ? <Edit/> : <Save />}>{modoEdicion ? 'ACTUALIZAR' : 'REGISTRAR'}</Button>
                                 </Grid>
-                            </Grid>
+                             </Grid>
                         </Paper>
 
-                        {/* TABLA */}
-                        <TableContainer component={Paper} sx={{ flexGrow: 1, border: '1px solid #333', bgcolor: '#1a1a1a' }}>
+                        <TableContainer component={Paper} sx={{ flexGrow: 1, border: '1px solid #333', bgcolor: '#1a1a1a', overflowX: 'auto' }}>
                             <Table size="small" stickyHeader>
-                                <TableHead>
-                                    <TableRow>
-                                        {negocioSeleccionado.campos.map(c => <TableCell key={c.key} sx={{bgcolor:'#000', color:'#0f0'}}>{c.label}</TableCell>)}
-                                        <TableCell sx={{bgcolor:'#000', color:'#0f0'}}>OPC</TableCell>
-                                    </TableRow>
-                                </TableHead>
+                                <TableHead><TableRow>
+                                    {camposConIdPrimero(negocioSeleccionado.campos).map(c => <TableCell key={c.key} sx={{bgcolor:'#000', color:'#0f0'}}>{c.label}</TableCell>)}
+                                    <TableCell sx={{bgcolor:'#000', color:'#0f0'}}>OPC</TableCell>
+                                </TableRow></TableHead>
                                 <TableBody>
                                     {datos.map((row, idx) => (
                                         <TableRow key={idx} hover>
-                                            {negocioSeleccionado.campos.map(c => <TableCell key={c.key}>{row[c.key]}</TableCell>)}
+                                            {camposConIdPrimero(negocioSeleccionado.campos).map(c => <TableCell key={c.key}>{row[c.key]}</TableCell>)}
                                             <TableCell>
-                                                <IconButton size="small" onClick={() => {setForm(row); setModoEdicion(true)}}><Edit fontSize="small" sx={{color:'#00cc00'}}/></IconButton>
+                                                <IconButton size="small" onClick={() => {setForm(row); setModoEdicion(true)}}><Edit fontSize="small" sx={{color:'#0f0'}}/></IconButton>
                                                 <IconButton size="small" onClick={() => eliminarDato(row.id)}><Delete fontSize="small" color="error"/></IconButton>
                                             </TableCell>
                                         </TableRow>
@@ -378,28 +396,34 @@ function App() {
                             </Table>
                         </TableContainer>
 
+                        {/* EDITOR PARA CARGAR JSON (APARTE) */}
+                        <Card sx={{ border: '1px solid #0f0', bgcolor: '#000' }}>
+                          <Box sx={{ p: 1, bgcolor: '#111', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Typography variant="caption" color="primary">MODULO_CARGA_JSON (PLANTILLA)</Typography>
+                            <Button size="small" variant="outlined" onClick={manejarCargaDesdeJson} startIcon={<PlaylistAdd/>}>CARGAR AL FORMULARIO</Button>
+                          </Box>
+                          <textarea
+                            style={{ width: '100%', height: '100px', backgroundColor: '#000', color: '#0f0', border: 'none', padding: '10px', fontFamily: 'Consolas', outline: 'none', resize: 'vertical' }}
+                            value={jsonInputCarga}
+                            onChange={(e) => setJsonInputCarga(e.target.value)}
+                          />
+                        </Card>
                     </Box>
-                ) : (
-                    <Box sx={{height:'100%', display:'flex', alignItems:'center', justifyContent:'center', border:'2px dashed #ccc'}}>
-                        <Typography sx={{color:'#000'}}>SELECCIONA UN SISTEMA</Typography>
-                    </Box>
-                )}
+                ) : <Box sx={{height:'100%', display:'flex', alignItems:'center', justifyContent:'center', border:'2px dashed #000'}}><Typography sx={{color:'#000'}}>SELECCIONA UN SISTEMA</Typography></Box>}
             </Grid>
         </Grid>
 
-        {/* 3. ABAJO: JSON VIEWER */}
-        <Box sx={{ mt: 2, height: '150px', bgcolor: '#1a1a1a', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
-            <Box sx={{ px: 2, py: 0.5, bgcolor: '#000', borderBottom: '1px solid #333', display: 'flex', alignItems: 'center' }}>
-                <DataObject sx={{ fontSize: 16, mr: 1, color: '#ff0' }} />
-                <Typography variant="caption" sx={{ color: '#ff0' }}>LIVE_JSON_STREAM</Typography>
+        {/* VISOR GENERAL - VISUALIZACIÓN JSON COMPLETA */}
+        <Box sx={{ mt: 2, height: {xs: '200px', md: '250px'}, bgcolor: '#1a1a1a', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+            <Box sx={{ px: 2, py: 1, bgcolor: '#000', borderBottom: '1px solid #333' }}>
+                <Typography variant="caption" sx={{ color: '#ff0' }}>LIVE_DATA_STREAM_JSON (TOTAL)</Typography>
             </Box>
             <Box sx={{ p: 1, overflow: 'auto', flexGrow: 1 }}>
-                <pre style={{ margin: 0, color: '#00ff00', fontSize: '11px', fontFamily: 'Consolas' }}>
+                <pre style={{ margin: 0, color: '#00ff00', fontSize: '12px', fontFamily: 'Consolas' }}>
                     {JSON.stringify(datos, null, 2)}
                 </pre>
             </Box>
         </Box>
-
       </Container>
     </ThemeProvider>
   );
