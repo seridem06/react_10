@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Swal from 'sweetalert2'; 
 import { 
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, 
@@ -75,7 +75,12 @@ function App() {
       options: "",    
       isInteger: false,
       numLength: "", 
-      decimals: "2"
+      decimals: "2",
+      // NUEVOS CAMPOS PARA CÁLCULOS
+      calculationType: "",  // 'multiply', 'age', 'license_status'
+      field1: "",           // Campo 1 para multiplicar (ej: precio)
+      field2: "",           // Campo 2 para multiplicar (ej: cantidad)
+      sourceField: ""       // Campo fuente para edad o licencia
   });
 
   // CARGAR AL INICIO (PERSISTENCIA SQLITE)
@@ -94,8 +99,19 @@ function App() {
       
       const estructura = {};
       negocioSeleccionado.campos.forEach(c => {
-        if (c.key !== 'id') {
-          estructura[c.key] = (c.type === 'number' && !c.isInteger) ? "0.00" : (c.type === 'number' ? 0 : "...");
+        // Excluir ID si es automático
+        if (c.key === 'id' && negocioSeleccionado.config?.idAutomatico) return;
+        
+        // Excluir campos calculados automáticamente
+        if (c.type === 'calculated' || c.type === 'age' || c.type === 'license_status') return;
+        
+        // Agregar el campo a la plantilla
+        if (c.type === 'number' && !c.isInteger) {
+          estructura[c.key] = "0.00";
+        } else if (c.type === 'number') {
+          estructura[c.key] = 0;
+        } else {
+          estructura[c.key] = "...";
         }
       });
       setJsonInputCarga(JSON.stringify(estructura, null, 2));
@@ -107,6 +123,90 @@ function App() {
       .then(res => res.json())
       .then(setDatos);
   };
+
+  // --- CÁLCULO AUTOMÁTICO DE CAMPOS CALCULADOS (CORREGIDO) ---
+  useEffect(() => {
+    if (!negocioSeleccionado || Object.keys(form).length === 0) return;
+    
+    const calcularCamposAutomaticos = () => {
+      const nuevoForm = { ...form };
+      let huboChangios = false;
+
+      negocioSeleccionado.campos.forEach(campo => {
+        // 1. CAMPO CALCULADO (Multiplicación)
+        if (campo.type === 'calculated' && campo.field1 && campo.field2) {
+          const val1 = parseFloat(form[campo.field1]) || 0;
+          const val2 = parseFloat(form[campo.field2]) || 0;
+          const resultado = (val1 * val2).toFixed(2);
+          
+          // Solo actualizar si el valor es diferente
+          if (String(nuevoForm[campo.key]) !== String(resultado)) {
+            nuevoForm[campo.key] = resultado;
+            huboChangios = true;
+          }
+        }
+
+        // 2. EDAD AUTOMÁTICA
+        if (campo.type === 'age' && campo.sourceField && form[campo.sourceField]) {
+          try {
+            const fechaNacimiento = new Date(form[campo.sourceField]);
+            const hoy = new Date();
+            let edad = hoy.getFullYear() - fechaNacimiento.getFullYear();
+            const mesActual = hoy.getMonth();
+            const mesNacimiento = fechaNacimiento.getMonth();
+            
+            if (mesActual < mesNacimiento || (mesActual === mesNacimiento && hoy.getDate() < fechaNacimiento.getDate())) {
+              edad--;
+            }
+            
+            // Solo actualizar si es válido y diferente
+            if (!isNaN(edad) && edad >= 0 && String(nuevoForm[campo.key]) !== String(edad)) {
+              nuevoForm[campo.key] = edad;
+              huboChangios = true;
+            }
+          } catch (e) {
+            // Si hay error en la fecha, no hacer nada
+          }
+        }
+
+        // 3. ESTADO DE LICENCIA
+        if (campo.type === 'license_status' && campo.sourceField && form[campo.sourceField]) {
+          try {
+            const fechaVencimiento = new Date(form[campo.sourceField]);
+            const hoy = new Date();
+            
+            // Comparar solo las fechas sin horas
+            hoy.setHours(0, 0, 0, 0);
+            fechaVencimiento.setHours(0, 0, 0, 0);
+            
+            const estado = fechaVencimiento >= hoy ? 'VIGENTE' : 'VENCIDA';
+            
+            if (nuevoForm[campo.key] !== estado) {
+              nuevoForm[campo.key] = estado;
+              huboChangios = true;
+            }
+          } catch (e) {
+            // Si hay error en la fecha, no hacer nada
+          }
+        }
+      });
+
+      if (huboChangios) {
+        setForm(nuevoForm);
+      }
+    };
+
+    calcularCamposAutomaticos();
+  }, [
+    form.fecha_nacimiento, 
+    form.fecha_vencimiento, 
+    form.precio, 
+    form.cantidad,
+    form.precio_unitario,
+    form.unidades,
+    negocioSeleccionado
+  ]);
+
 
   // --- FORMATEADOR DE DECIMALES (CORRECCIÓN VISUAL SOLICITADA) ---
   const formatearValor = (valor, campoConfig) => {
@@ -159,8 +259,17 @@ function App() {
   };
 
   const handleSubmitDatos = () => {
-    // VALIDACIÓN ESTRICTA: No permitir campos vacíos
-    const camposRequeridos = negocioSeleccionado.campos.filter(c => c.key !== 'id' || !negocioSeleccionado.config?.idAutomatico);
+    // VALIDACIÓN ESTRICTA: No permitir campos vacíos (EXCEPTO LOS CALCULADOS)
+    const camposRequeridos = negocioSeleccionado.campos.filter(c => {
+      // Excluir el ID si es automático
+      if (c.key === 'id' && negocioSeleccionado.config?.idAutomatico) return false;
+      
+      // Excluir campos calculados automáticamente
+      if (c.type === 'calculated' || c.type === 'age' || c.type === 'license_status') return false;
+      
+      return true;
+    });
+    
     const hayVacios = camposRequeridos.some(c => !form[c.key] || form[c.key].toString().trim() === "");
 
     if (hayVacios) {
@@ -191,9 +300,17 @@ function App() {
     try {
       const parsed = JSON.parse(jsonInputCarga);
       
-      // Validar que los campos del JSON coincidan con el esquema
+      // Validar que los campos del JSON coincidan con el esquema (EXCEPTO LOS CALCULADOS)
       const camposEsquema = negocioSeleccionado.campos
-        .filter(c => c.key !== 'id' || !negocioSeleccionado.config?.idAutomatico)
+        .filter(c => {
+          // Excluir ID si es automático
+          if (c.key === 'id' && negocioSeleccionado.config?.idAutomatico) return false;
+          
+          // Excluir campos calculados
+          if (c.type === 'calculated' || c.type === 'age' || c.type === 'license_status') return false;
+          
+          return true;
+        })
         .map(c => c.key);
       
       const camposJson = Object.keys(parsed);
@@ -269,7 +386,19 @@ function App() {
     if (!campoTemporal.label) return;
     const key = campoTemporal.label.toLowerCase().replace(/ /g, "_");
     setNuevosCampos([...nuevosCampos, { ...campoTemporal, key }]);
-    setCampoTemporal({ label: "", type: "text", maxLength: "", options: "", isInteger: false, numLength: "", decimals: "2" });
+    setCampoTemporal({ 
+      label: "", 
+      type: "text", 
+      maxLength: "", 
+      options: "", 
+      isInteger: false, 
+      numLength: "", 
+      decimals: "2",
+      calculationType: "",
+      field1: "",
+      field2: "",
+      sourceField: ""
+    });
   };
 
   const guardarSistemaBuilder = () => {
@@ -352,6 +481,9 @@ function App() {
                                     <MenuItem value="number">Número</MenuItem>
                                     <MenuItem value="select">Lista (Select)</MenuItem>
                                     <MenuItem value="date">Fecha</MenuItem>
+                                    <MenuItem value="calculated">Calculado (A × B)</MenuItem>
+                                    <MenuItem value="age">Edad (Auto)</MenuItem>
+                                    <MenuItem value="license_status">Estado Licencia</MenuItem>
                                 </Select>
                             </FormControl>
                         </Grid>
@@ -369,6 +501,19 @@ function App() {
                             )}
                             {campoTemporal.type === 'select' && (
                                 <TextField label="Opciones (Ej: M,F,X)" size="small" fullWidth value={campoTemporal.options} onChange={(e)=>setCampoTemporal({...campoTemporal, options:e.target.value})} />
+                            )}
+                            {campoTemporal.type === 'calculated' && (
+                                <Box sx={{display:'flex', gap:1}}>
+                                    <TextField label="Campo 1 (key)" size="small" placeholder="precio_unitario" value={campoTemporal.field1} onChange={(e)=>setCampoTemporal({...campoTemporal, field1:e.target.value})} />
+                                    <Typography sx={{alignSelf:'center'}}>×</Typography>
+                                    <TextField label="Campo 2 (key)" size="small" placeholder="cantidad" value={campoTemporal.field2} onChange={(e)=>setCampoTemporal({...campoTemporal, field2:e.target.value})} />
+                                </Box>
+                            )}
+                            {campoTemporal.type === 'age' && (
+                                <TextField label="Campo Fecha Nacimiento (key)" size="small" fullWidth placeholder="fecha_nacimiento" value={campoTemporal.sourceField} onChange={(e)=>setCampoTemporal({...campoTemporal, sourceField:e.target.value})} />
+                            )}
+                            {campoTemporal.type === 'license_status' && (
+                                <TextField label="Campo Fecha Vencimiento (key)" size="small" fullWidth placeholder="fecha_vencimiento" value={campoTemporal.sourceField} onChange={(e)=>setCampoTemporal({...campoTemporal, sourceField:e.target.value})} />
                             )}
                         </Grid>
                         <Grid item xs={12} md={2}><Button variant="contained" fullWidth onClick={agregarCampoBuilder}>AÑADIR CAMPO</Button></Grid>
@@ -430,7 +575,6 @@ function App() {
                                     <Grid item xs={12} sm={4} key={campo.key}>
                                         {campo.type === 'select' ? (
                                             <FormControl fullWidth size="small" sx={{ '& .MuiSelect-select': { minWidth: '150px' } }}>
-                                                {/* FIX: labelId y label vinculados para evitar el recorte visual */}
                                                 <InputLabel id={`lbl-${campo.key}`}>{campo.label}</InputLabel>
                                                 <Select labelId={`lbl-${campo.key}`} value={form[campo.key] || ''} label={campo.label} name={campo.key} onChange={(e) => handleInputChange(e, campo)}>
                                                     {campo.options.split(',').map(opt => <MenuItem key={opt} value={opt.trim()}>{opt.trim()}</MenuItem>)}
@@ -440,12 +584,27 @@ function App() {
                                             <TextField
                                                 label={campo.label}
                                                 name={campo.key}
-                                                value={campo.key === 'id' && negocioSeleccionado.config?.idAutomatico ? 'AUTO' : (form[campo.key] || '')}
+                                                value={
+                                                    campo.key === 'id' && negocioSeleccionado.config?.idAutomatico ? 'AUTO' : 
+                                                    (campo.type === 'calculated' || campo.type === 'age' || campo.type === 'license_status') ? (form[campo.key] || 'Auto') :
+                                                    (form[campo.key] || '')
+                                                }
                                                 onChange={(e) => handleInputChange(e, campo)}
                                                 fullWidth size="small"
                                                 type={campo.type === 'date' ? 'date' : 'text'}
                                                 InputLabelProps={{ shrink: true }}
-                                                disabled={campo.key === 'id' && negocioSeleccionado.config?.idAutomatico}
+                                                disabled={
+                                                    (campo.key === 'id' && negocioSeleccionado.config?.idAutomatico) ||
+                                                    campo.type === 'calculated' ||
+                                                    campo.type === 'age' ||
+                                                    campo.type === 'license_status'
+                                                }
+                                                sx={{
+                                                    '& .MuiInputBase-input.Mui-disabled': {
+                                                        WebkitTextFillColor: campo.type === 'license_status' && form[campo.key] === 'VENCIDA' ? '#ff0000' : '#00ff00',
+                                                        fontWeight: 'bold'
+                                                    }
+                                                }}
                                             />
                                         )}
                                     </Grid>
